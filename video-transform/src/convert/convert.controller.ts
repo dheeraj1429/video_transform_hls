@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Post,
   UploadedFile,
@@ -36,7 +37,13 @@ export class ConvertController {
   async videoTransform(
     @UploadedFile() file: Express.Multer.File & { file_uuid: string },
   ) {
-    const { file_uuid } = file;
+    const file_uuid = file?.file_uuid;
+
+    if (!file_uuid)
+      throw new BadRequestException(
+        'File uuid not found. please provide a valid file_uuid',
+      );
+
     const destination = file.destination;
     const inputFilePath = file.path;
     const outputFilePath: string = `/home/app/outputs/${file_uuid}/`;
