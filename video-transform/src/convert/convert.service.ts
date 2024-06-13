@@ -1,10 +1,9 @@
 import {
-  BadRequestException,
   Injectable,
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
-import { exec } from 'child_process';
+import { spawn } from 'child_process';
 import { promises as fsPromises } from 'fs';
 import * as path from 'path';
 
@@ -16,8 +15,8 @@ export class ConvertService {
   constructor() {
     this.qualities = [
       { resolution: '1280x720', bitrate: '1500k' },
-      { resolution: '854x480', bitrate: '800k' },
-      { resolution: '640x360', bitrate: '500k' },
+      // { resolution: '854x480', bitrate: '800k' },
+      // { resolution: '640x360', bitrate: '500k' },
     ];
   }
 
@@ -33,80 +32,72 @@ export class ConvertService {
     }
   }
 
-  private async removeDirectory(dir: string): Promise<void> {
-    try {
-      await fsPromises.rm(dir, { recursive: true });
-      this.logger.log(`Directory removed: ${dir}`);
-    } catch (error) {
-      this.logger.error(`Failed to remove directory: ${error.message}`);
-      throw new InternalServerErrorException(
-        `Failed to remove directory: ${error.message}`,
-      );
-    }
-  }
-
   async videoTransform(
-    inputFilePath: string,
-    destination: string,
     outputFilePath: string,
+    file: Express.Multer.File,
   ): Promise<void> {
-    if (inputFilePath && destination && outputFilePath) {
-      for (let item of this.qualities) {
-        const outputPathWithResolution = path.join(
-          outputFilePath,
-          item.resolution,
-        );
+    for (let item of this.qualities) {
+      const outputPathWithResolution = path.join(
+        outputFilePath,
+        item.resolution,
+      );
 
-        await this.createDirectory(outputPathWithResolution);
+      await this.createDirectory(outputPathWithResolution);
 
-        const command = `ffmpeg -i ${inputFilePath} -codec:v libx264 -codec:a aac -vf "scale=${item.resolution}" -b:v ${item.bitrate} -bufsize ${item.bitrate} -maxrate ${item.bitrate} -hls_time 10 -hls_playlist_type vod -hls_segment_filename ${outputPathWithResolution}/segment%03d.ts -start_number 0 ${outputPathWithResolution}/index.m3u8`;
+      const args = [
+        '-i',
+        'pipe:0',
+        '-codec:v',
+        'libx264',
+        '-codec:a',
+        'aac',
+        '-vf',
+        `scale=${item.resolution}`,
+        '-b:v',
+        item.bitrate,
+        '-bufsize',
+        item.bitrate,
+        '-maxrate',
+        item.bitrate,
+        '-hls_time',
+        '10',
+        '-hls_playlist_type',
+        'vod',
+        `-hls_segment_filename`,
+        path.join(outputPathWithResolution, 'segment%03d.ts'),
+        '-start_number',
+        '0',
+        path.join(outputPathWithResolution, 'index.m3u8'),
+      ];
 
-        this.logger.log(`Executing command: ${command}`);
+      const ffmpeg = spawn('ffmpeg', args);
+      let ffmpegStderr = '';
 
-        try {
-          exec(command, (error, stdout, stderr) => {
-            if (error) {
-              throw new InternalServerErrorException(
-                `Execution error: ${error.message}`,
-              );
-            }
+      ffmpeg.stdout.on('data', (data) => {
+        this.logger.log(`stdout: ${data}`);
+      });
 
-            if (stderr) {
-              const errorMessages = stderr
-                .split('\n')
-                .filter((line) => line.toLowerCase().includes('error'));
+      ffmpeg.stderr.on('data', (data) => {
+        ffmpegStderr += data.toString();
+        this.logger.log(`stderr: ${data}`);
+      });
 
-              if (errorMessages.length > 0) {
-                this.logger.error(`ffmpeg errors: ${errorMessages.join('\n')}`);
-                throw new InternalServerErrorException(
-                  `ffmpeg errors: ${errorMessages.join('\n')}`,
-                );
-              } else {
-                this.logger.warn(`ffmpeg stderr: ${stderr}`);
-              }
-            }
-
-            try {
-              this.logger.log('Segment creation successful.');
-              this.logger.log(`Segments output dir ${outputFilePath}`);
-              this.logger.log('ready for uploading segments into the cloud');
-            } catch (fileError) {
-              this.logger.error(`Output files not found: ${fileError.message}`);
-              throw new InternalServerErrorException(
-                `Output files not found: ${fileError.message}`,
-              );
-            }
-
-            this.logger.log(`ffmpeg stdout: ${stdout}`);
-          });
-        } catch (err) {
+      ffmpeg.on('close', (code: number) => {
+        if (code === 0) {
+          this.logger.log('Video segment ended successfully');
+        } else {
           throw new InternalServerErrorException(
-            `Failed to execute command: ${command}`,
+            `ffmpeg process exited with code ${code}. Errors: ${ffmpegStderr}`,
           );
         }
-      }
-    } else {
-      throw new BadRequestException();
+      });
+
+      ffmpeg.on('error', (err) => {
+        this.logger.error(err);
+      });
+
+      ffmpeg.stdin.write(file.buffer);
+      ffmpeg.stdin.end();
     }
   }
 }
